@@ -2,13 +2,13 @@
 
 use core::fmt::Write as _;
 
-use esp_hal::gpio::{Input, Output};
+use esp_hal::gpio::Input;
 use heapless::{String, Vec};
 
 use crate::{
     bootloader_info::{AppInfo, PartitionInfo},
+    drivers::{gpio::LedHandle, oled::OledHandle},
     ml,
-    oled::OledDisplay,
     scheduler::{Task, TaskCommand, TaskContext, TaskPriority},
 };
 
@@ -22,7 +22,7 @@ type PartitionLines = Vec<PartitionLine, 4>;
 
 /// UI task rendering boot information and handling scroll buttons.
 pub struct UiTask {
-    display: Option<OledDisplay>,
+    display: Option<OledHandle>,
     scroll_up: Input<'static>,
     scroll_down: Input<'static>,
     prefix_lines: [&'static str; 7],
@@ -36,7 +36,7 @@ pub struct UiTask {
 
 impl UiTask {
     pub fn new(
-        display: Option<OledDisplay>,
+        display: Option<OledHandle>,
         scroll_up: Input<'static>,
         scroll_down: Input<'static>,
         app_info: AppInfo,
@@ -97,8 +97,12 @@ impl UiTask {
             let _ = lines.push(line);
         }
 
-        if let Some(display) = self.display.as_mut() {
-            let _ = display.show_lines(&lines);
+        if let Some(handle) = &self.display {
+            if let Some(result) = handle.try_with(|display| display.show_lines(&lines)) {
+                if let Err(err) = result {
+                    esp_println::println!("OLED render failed: {:?}", err);
+                }
+            }
         }
     }
 
@@ -150,12 +154,12 @@ impl Task for UiTask {
 
 /// Simple LED heartbeat task.
 pub struct LedTask {
-    led: Output<'static>,
+    led: LedHandle,
     state: bool,
 }
 
 impl LedTask {
-    pub fn new(led: Output<'static>) -> Self {
+    pub fn new(led: LedHandle) -> Self {
         Self { led, state: false }
     }
 }
@@ -167,11 +171,13 @@ impl Task for LedTask {
 
     fn poll(&mut self, _ctx: &mut TaskContext) -> TaskCommand {
         self.state = !self.state;
-        if self.state {
-            let _ = self.led.set_high();
-        } else {
-            let _ = self.led.set_low();
-        }
+        let _ = self.led.try_with(|led| {
+            if self.state {
+                let _ = led.set_high();
+            } else {
+                let _ = led.set_low();
+            }
+        });
         TaskCommand::SleepMs(500)
     }
 }

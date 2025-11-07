@@ -13,10 +13,9 @@ use esp_hal::{
 };
 
 mod bootloader_info;
+mod drivers;
 mod frames;
-mod gpio;
 mod heap;
-mod i2c;
 mod interrupts; // Provides DefaultHandler for interrupt stubs
 mod ml;
 mod oled;
@@ -24,14 +23,11 @@ mod scheduler;
 mod stack;
 mod task;
 mod timer;
-mod uart;
 
 use bootloader_info::{get_app_info, get_partition_info};
-use gpio::init_gpio;
-use i2c::init_i2c;
+use drivers::{gpio, i2c, oled as oled_driver, uart};
 use scheduler::Scheduler;
 use task::{LedTask, MlTask, UiTask};
-use uart::init_uart;
 esp_app_desc!(); // defaults are fine
 
 static mut SCHEDULER: Scheduler = Scheduler::new();
@@ -54,9 +50,6 @@ fn main() -> ! {
 
     unsafe { heap::init(); }
 
-    init_uart();
-    esp_println::println!("Initializing system...");
-
     let esp_hal::peripherals::Peripherals {
         I2C0,
         GPIO2,
@@ -73,36 +66,58 @@ fn main() -> ! {
         esp_println::println!("Timer init failed: {}", err);
     }
 
-    let led = init_gpio(GPIO2);
+    if let Err(err) = uart::init_uart() {
+        esp_println::println!("UART driver init failed: {:?}", err);
+    }
+
+    let led_handle = match gpio::init_led(GPIO2) {
+        Ok(handle) => Some(handle),
+        Err(err) => {
+            esp_println::println!("LED driver init failed: {:?}", err);
+            None
+        }
+    };
+
     let scroll_up = Input::new(GPIO18, InputConfig::default().with_pull(Pull::Up));
     let scroll_down = Input::new(GPIO19, InputConfig::default().with_pull(Pull::Up));
 
     esp_println::println!("Initializing I2C0 for OLED display...");
-    let mut oled_display = match init_i2c(I2C0, GPIO21, GPIO22) {
-        Ok(i2c) => match oled::OledDisplay::new(i2c) {
-            Ok(display) => {
-                esp_println::println!("OLED display initialized");
-                Some(display)
-            }
-            Err(err) => {
-                esp_println::println!("OLED init failed: {:?}", err);
-                None
-            }
-        },
+    let i2c_handle = match i2c::init_i2c0(I2C0, GPIO21, GPIO22) {
+        Ok(handle) => {
+            esp_println::println!("I2C0 initialised");
+            Some(handle)
+        }
         Err(err) => {
             esp_println::println!("I2C initialization failed: {:?}", err);
             None
         }
     };
 
-    if let Some(display) = oled_display.as_mut() {
-        let _ = display.show_boot_progress("Starting...");
+    let mut oled_handle: Option<oled_driver::OledHandle> = if let Some(ref handle) = i2c_handle {
+        match oled_driver::init_oled(handle) {
+            Ok(display_handle) => {
+                esp_println::println!("OLED display initialized");
+                Some(display_handle)
+            }
+            Err(err) => {
+                esp_println::println!("OLED init failed: {:?}", err);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    if let Some(handle) = oled_handle {
+        let _ = handle.try_with(|display| display.show_boot_progress("Starting..."));
+        oled_handle = Some(handle);
     }
 
     let app_info = get_app_info();
-    if let Some(display) = oled_display.as_mut() {
-        let _ = display.show_app_info(app_info.name, app_info.version);
-        let _ = display.play_boot_animation(spin_delay_ms);
+    if let Some(handle) = oled_handle {
+        let _ = handle.try_with(|display| display.show_app_info(app_info.name, app_info.version));
+        let _ = handle.try_with(|display| display.play_boot_animation(spin_delay_ms));
+        oled_handle = Some(handle);
     }
 
     let partitions = get_partition_info();
@@ -116,22 +131,30 @@ fn main() -> ! {
         esp_println::println!("  {}: {}", part.name, part.size);
     }
 
-    // Create tasks and register them with the scheduler
-    #[allow(static_mut_refs)]
-    let ui_task_ref: &mut dyn scheduler::Task = unsafe {
-        UI_TASK.write(UiTask::new(oled_display, scroll_up, scroll_down, app_info, partitions))
-    };
-    #[allow(static_mut_refs)]
-    let led_task_ref: &mut dyn scheduler::Task = unsafe { LED_TASK.write(LedTask::new(led)) };
-    #[allow(static_mut_refs)]
-    let ml_task_ref: &mut dyn scheduler::Task = unsafe { ML_TASK.write(MlTask::new()) };
-
     #[allow(static_mut_refs)]
     unsafe {
         let scheduler = &mut SCHEDULER;
-        let _ = scheduler.spawn(ui_task_ref);
-        let _ = scheduler.spawn(led_task_ref);
-        let _ = scheduler.spawn(ml_task_ref);
+
+        if let Some(handle) = oled_handle {
+            let ui_task: &mut dyn scheduler::Task = UI_TASK.write(UiTask::new(
+                Some(handle),
+                scroll_up,
+                scroll_down,
+                app_info,
+                partitions,
+            ));
+            let _ = scheduler.spawn(ui_task);
+        } else {
+            esp_println::println!("UI task disabled: OLED unavailable");
+        }
+
+        if let Some(handle) = led_handle {
+            let led_task: &mut dyn scheduler::Task = LED_TASK.write(LedTask::new(handle));
+            let _ = scheduler.spawn(led_task);
+        }
+
+        let ml_task: &mut dyn scheduler::Task = ML_TASK.write(MlTask::new());
+        let _ = scheduler.spawn(ml_task);
     }
 
     loop {
