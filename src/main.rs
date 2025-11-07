@@ -1,73 +1,43 @@
 #![no_std]
 #![no_main]
+#![feature(alloc_error_handler)]
 
-use core::fmt::Write as _;
+extern crate alloc;
+
+use core::mem::MaybeUninit;
 use esp_backtrace as _;
 use esp_bootloader_esp_idf::esp_app_desc;
 use esp_hal::{
     gpio::{Input, InputConfig, Pull},
     xtensa_lx_rt::entry,
 };
-use heapless::{String, Vec};
 
 mod bootloader_info;
 mod frames;
 mod gpio;
+mod heap;
 mod i2c;
 mod interrupts; // Provides DefaultHandler for interrupt stubs
 mod ml;
 mod oled;
+mod scheduler;
+mod stack;
+mod task;
+mod timer;
 mod uart;
 
-use bootloader_info::{get_app_info, get_partition_info, partition_info_to_tuples};
+use bootloader_info::{get_app_info, get_partition_info};
 use gpio::init_gpio;
 use i2c::init_i2c;
+use scheduler::Scheduler;
+use task::{LedTask, MlTask, UiTask};
 use uart::init_uart;
 esp_app_desc!(); // defaults are fine
 
-const VISIBLE_LINES: usize = 5;
-
-type PartitionLine = String<32>;
-type PartitionLines = Vec<PartitionLine, 4>;
-type VisibleLines<'a> = Vec<&'a str, VISIBLE_LINES>;
-
-fn line_at<'a>(
-    index: usize,
-    prefix: &'a [&'a str],
-    partitions: &'a [PartitionLine],
-    suffix: &'a [&'a str],
-) -> Option<&'a str> {
-    if index < prefix.len() {
-        Some(prefix[index])
-    } else if index < prefix.len() + partitions.len() {
-        Some(partitions[index - prefix.len()].as_str())
-    } else {
-        let suffix_index = index - prefix.len() - partitions.len();
-        suffix.get(suffix_index).copied()
-    }
-}
-
-fn fill_visible_lines<'a>(
-    buffer: &mut VisibleLines<'a>,
-    prefix: &'a [&'a str],
-    partitions: &'a [PartitionLine],
-    suffix: &'a [&'a str],
-    start: usize,
-    total_lines: usize,
-) {
-    buffer.clear();
-
-    if total_lines == 0 || start >= total_lines {
-        return;
-    }
-
-    let end = core::cmp::min(start + VISIBLE_LINES, total_lines);
-    for index in start..end {
-        if let Some(line) = line_at(index, prefix, partitions, suffix) {
-            let _ = buffer.push(line);
-        }
-    }
-}
+static mut SCHEDULER: Scheduler = Scheduler::new();
+static mut UI_TASK: MaybeUninit<UiTask> = MaybeUninit::uninit();
+static mut LED_TASK: MaybeUninit<LedTask> = MaybeUninit::uninit();
+static mut ML_TASK: MaybeUninit<MlTask> = MaybeUninit::uninit();
 
 fn spin_delay_ms(ms: u32) {
     const INNER_LOOPS: u32 = 25_000;
@@ -82,6 +52,8 @@ fn spin_delay_ms(ms: u32) {
 fn main() -> ! {
     let peripherals = esp_hal::init(esp_hal::Config::default());
 
+    unsafe { heap::init(); }
+
     init_uart();
     esp_println::println!("Initializing system...");
 
@@ -92,10 +64,16 @@ fn main() -> ! {
         GPIO19,
         GPIO21,
         GPIO22,
+        TIMG0,
         ..
     } = peripherals;
 
-    let mut led = init_gpio(GPIO2);
+    // Initialize system tick timer (1 kHz)
+    if let Err(err) = unsafe { timer::init(TIMG0) } {
+        esp_println::println!("Timer init failed: {}", err);
+    }
+
+    let led = init_gpio(GPIO2);
     let scroll_up = Input::new(GPIO18, InputConfig::default().with_pull(Pull::Up));
     let scroll_down = Input::new(GPIO19, InputConfig::default().with_pull(Pull::Up));
 
@@ -128,46 +106,7 @@ fn main() -> ! {
     }
 
     let partitions = get_partition_info();
-    let partition_rows = partition_info_to_tuples(&partitions);
 
-    let prefix_lines = [
-        "TrustG33k OS",
-        "-----------",
-        "App Name",
-        app_info.name,
-        "Version",
-        app_info.version,
-        "Partitions",
-    ];
-    let suffix_lines = ["Use buttons", "UP/DOWN to scroll"];
-
-    let mut partition_lines: PartitionLines = PartitionLines::new();
-    for &(name, size) in &partition_rows {
-        let mut line: PartitionLine = PartitionLine::new();
-        let _ = write!(line, "{}: {}", name, size);
-        let _ = partition_lines.push(line);
-    }
-
-    let total_lines = prefix_lines.len() + partition_lines.len() + suffix_lines.len();
-
-    let mut scroll_offset = 0usize;
-    let mut visible_lines: VisibleLines = VisibleLines::new();
-    fill_visible_lines(
-        &mut visible_lines,
-        &prefix_lines,
-        &partition_lines,
-        &suffix_lines,
-        scroll_offset,
-        total_lines,
-    );
-
-    if let Some(display) = oled_display.as_mut() {
-        let _ = display.show_lines(&visible_lines);
-    }
-    let mut up_pressed = false;
-    let mut down_pressed = false;
-
-    // Initialize ML inference
     ml::init();
 
     esp_println::println!("hello from no_std on ESP32!");
@@ -177,60 +116,28 @@ fn main() -> ! {
         esp_println::println!("  {}: {}", part.name, part.size);
     }
 
-    // Main kernel loop
+    // Create tasks and register them with the scheduler
+    #[allow(static_mut_refs)]
+    let ui_task_ref: &mut dyn scheduler::Task = unsafe {
+        UI_TASK.write(UiTask::new(oled_display, scroll_up, scroll_down, app_info, partitions))
+    };
+    #[allow(static_mut_refs)]
+    let led_task_ref: &mut dyn scheduler::Task = unsafe { LED_TASK.write(LedTask::new(led)) };
+    #[allow(static_mut_refs)]
+    let ml_task_ref: &mut dyn scheduler::Task = unsafe { ML_TASK.write(MlTask::new()) };
+
+    #[allow(static_mut_refs)]
+    unsafe {
+        let scheduler = &mut SCHEDULER;
+        let _ = scheduler.spawn(ui_task_ref);
+        let _ = scheduler.spawn(led_task_ref);
+        let _ = scheduler.spawn(ml_task_ref);
+    }
+
     loop {
-        // Toggle LED
-        // led.toggle();
-
-        // Handle scroll button inputs (active low due to pull-ups)
-        let mut display_updated = false;
-
-        if scroll_up.is_low() {
-            if !up_pressed {
-                if scroll_offset > 0 {
-                    scroll_offset -= 1;
-                    display_updated = true;
-                }
-                up_pressed = true;
-            }
-        } else {
-            up_pressed = false;
-        }
-
-        if scroll_down.is_low() {
-            if !down_pressed {
-                if scroll_offset + VISIBLE_LINES < total_lines {
-                    scroll_offset += 1;
-                    display_updated = true;
-                }
-                down_pressed = true;
-            }
-        } else {
-            down_pressed = false;
-        }
-
-        if display_updated {
-            fill_visible_lines(
-                &mut visible_lines,
-                &prefix_lines,
-                &partition_lines,
-                &suffix_lines,
-                scroll_offset,
-                total_lines,
-            );
-            if let Some(display) = oled_display.as_mut() {
-                let _ = display.show_lines(&visible_lines);
-            }
-            esp_println::println!("Scroll offset: {}", scroll_offset);
-        }
-
-        // Run ML inference
-        ml::run_inference();
-
-        // Simple delay (blocking)
-        // In a real OS, you'd use a timer interrupt or scheduler
-        for _ in 0..1_000_000 {
-            core::hint::spin_loop();
+        #[allow(static_mut_refs)]
+        unsafe {
+            SCHEDULER.run_ready();
         }
     }
 }

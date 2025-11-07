@@ -52,13 +52,3 @@ pub fn get_partition_info() -> [PartitionInfo; 4] {
         },
     ]
 }
-
-/// Convert partition info to tuple format for OLED display
-pub fn partition_info_to_tuples(partitions: &[PartitionInfo; 4]) -> [(&str, &str); 4] {
-    [
-        (partitions[0].name, partitions[0].size),
-        (partitions[1].name, partitions[1].size),
-        (partitions[2].name, partitions[2].size),
-        (partitions[3].name, partitions[3].size),
-    ]
-}
