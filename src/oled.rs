@@ -34,6 +34,7 @@ pub struct OledDisplay {
 
 impl OledDisplay {
     const LINE_SPACING: i32 = 12;
+    pub const VISIBLE_LINES: usize = 5;
     const PARTITION_SIZE_COLUMN: i32 = 72;
 
     /// Initialize the OLED display in buffered graphics mode.
@@ -64,6 +65,32 @@ impl OledDisplay {
         for (index, line) in lines.into_iter().enumerate() {
             let position = Point::new(0, (index as i32) * Self::LINE_SPACING);
             let _ = Text::with_baseline(line, position, self.text_style, Baseline::Top)
+                .draw(&mut self.display);
+        }
+
+        self.display.flush()
+    }
+
+    /// Render a subset of `lines`, starting at `start_line`, filling the visible window.
+    pub fn show_scrollable<T: AsRef<str>>(
+        &mut self,
+        lines: &[T],
+        start_line: usize,
+    ) -> OledResult<()> {
+        self.display.clear_buffer();
+
+        let total_lines = lines.len();
+        let max_start = total_lines.saturating_sub(Self::VISIBLE_LINES);
+        let clamped_start = start_line.min(max_start);
+
+        for (visible_idx, line) in lines
+            .iter()
+            .skip(clamped_start)
+            .take(Self::VISIBLE_LINES)
+            .enumerate()
+        {
+            let position = Point::new(0, (visible_idx as i32) * Self::LINE_SPACING);
+            let _ = Text::with_baseline(line.as_ref(), position, self.text_style, Baseline::Top)
                 .draw(&mut self.display);
         }
 
