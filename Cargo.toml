@@ -12,6 +12,9 @@ critical-section = "1.1"
 #esp-hal = "1"
 esp-bootloader-esp-idf = { version = "0.4", features = ["esp32"] }
 esp-rom-sys = "0.1"
+display-interface = { version = "0.5", default-features = false }
+ssd1306 = { version = "0.10", default-features = false, features = ["graphics"] }
+embedded-graphics = { version = "0.8", default-features = false }
 
 [profile.release]
 lto = "fat"

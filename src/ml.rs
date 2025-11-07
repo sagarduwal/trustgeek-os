@@ -11,22 +11,22 @@ impl FixedPoint {
     pub const fn from_int(val: i16) -> Self {
         FixedPoint((val as i32) << 16)
     }
-    
+
     /// Create from float (approximate)
     pub fn from_float(val: f32) -> Self {
         FixedPoint((val * 65536.0) as i32)
     }
-    
+
     /// Convert to float
     pub fn to_float(self) -> f32 {
         self.0 as f32 / 65536.0
     }
-    
+
     /// Add two fixed-point numbers
     pub fn add(self, other: Self) -> Self {
         FixedPoint(self.0.wrapping_add(other.0))
     }
-    
+
     /// Multiply two fixed-point numbers
     pub fn mul(self, other: Self) -> Self {
         // Multiply and shift right by 16 bits
@@ -42,7 +42,13 @@ impl fmt::Display for FixedPoint {
 }
 
 /// Simple matrix-vector multiplication (for neural network inference)
-pub fn matvec_mult(weights: &[FixedPoint], input: &[FixedPoint], output: &mut [FixedPoint], rows: usize, cols: usize) {
+pub fn matvec_mult(
+    weights: &[FixedPoint],
+    input: &[FixedPoint],
+    output: &mut [FixedPoint],
+    rows: usize,
+    cols: usize,
+) {
     for i in 0..rows {
         let mut sum = FixedPoint::from_int(0);
         for j in 0..cols {
@@ -68,4 +74,3 @@ pub fn run_inference() {
     // let mut output = [FixedPoint::from_int(0); /* output size */];
     // matvec_mult(&weights, &input, &mut output, /* rows */, /* cols */);
 }
-
