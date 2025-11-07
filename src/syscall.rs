@@ -1,6 +1,6 @@
 //! Minimal syscall interface for cooperative kernel.
 
-use crate::scheduler::{Scheduler, TaskCommand};
+use crate::scheduler::Scheduler;
 use crate::timer;
 
 #[repr(u32)]

@@ -3,6 +3,7 @@
 use core::fmt::Write as _;
 
 use esp_hal::gpio::Input;
+use esp_println::println;
 use heapless::{String, Vec};
 
 use crate::{
@@ -14,21 +15,39 @@ use crate::{
 
 /// Number of lines visible on the OLED at once.
 const VISIBLE_LINES: usize = 5;
+const MAX_MENU_ITEMS: usize = 16;
 
-/// Heapless string used to render partition rows.
-type PartitionLine = String<32>;
-/// Stored partition rows.
-type PartitionLines = Vec<PartitionLine, 4>;
+type MenuLabel = String<32>;
+type MenuItems = Vec<MenuItem, MAX_MENU_ITEMS>;
+
+#[derive(Clone)]
+struct MenuItem {
+    label: MenuLabel,
+    feature: MenuFeature,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy)]
+enum MenuFeature {
+    About,
+    AppInfo,
+    Version,
+    Partition(usize),
+    Diagnostics,
+    ToggleLed,
+    RunMl,
+    Instructions,
+}
 
 /// UI task rendering boot information and handling scroll buttons.
 pub struct UiTask {
     display: Option<OledHandle>,
     scroll_up: Input<'static>,
     scroll_down: Input<'static>,
-    prefix_lines: [&'static str; 7],
-    suffix_lines: [&'static str; 2],
-    partition_lines: PartitionLines,
-    scroll_offset: usize,
+    menu_items: MenuItems,
+    selected_index: usize,
+    view_offset: usize,
+    last_logged_index: Option<usize>,
     up_pressed: bool,
     down_pressed: bool,
     dirty: bool,
@@ -42,76 +61,141 @@ impl UiTask {
         app_info: AppInfo,
         partitions: [PartitionInfo; 4],
     ) -> Self {
-        let mut partition_lines: PartitionLines = PartitionLines::new();
-        for part in partitions.iter() {
-            let mut line: PartitionLine = PartitionLine::new();
-            let _ = write!(line, "{}: {}", part.name, part.size);
-            let _ = partition_lines.push(line);
+        let mut menu_items: MenuItems = MenuItems::new();
+
+        let mut label = MenuLabel::new();
+        let _ = label.push_str("About TrustG33k OS");
+        let _ = menu_items.push(MenuItem {
+            label,
+            feature: MenuFeature::About,
+        });
+
+        let mut label = MenuLabel::new();
+        let _ = write!(label, "App: {}", app_info.name);
+        let _ = menu_items.push(MenuItem {
+            label,
+            feature: MenuFeature::AppInfo,
+        });
+
+        let mut label = MenuLabel::new();
+        let _ = write!(label, "Version: {}", app_info.version);
+        let _ = menu_items.push(MenuItem {
+            label,
+            feature: MenuFeature::Version,
+        });
+
+        for (idx, part) in partitions.iter().enumerate() {
+            let mut label = MenuLabel::new();
+            let _ = write!(label, "{}: {}", part.name, part.size);
+            let _ = menu_items.push(MenuItem {
+                label,
+                feature: MenuFeature::Partition(idx),
+            });
         }
+
+        let mut label = MenuLabel::new();
+        let _ = label.push_str("Run ML Inference");
+        let _ = menu_items.push(MenuItem {
+            label,
+            feature: MenuFeature::RunMl,
+        });
+
+        let mut label = MenuLabel::new();
+        let _ = label.push_str("Toggle LED");
+        let _ = menu_items.push(MenuItem {
+            label,
+            feature: MenuFeature::ToggleLed,
+        });
+
+        let mut label = MenuLabel::new();
+        let _ = label.push_str("Diagnostics");
+        let _ = menu_items.push(MenuItem {
+            label,
+            feature: MenuFeature::Diagnostics,
+        });
+
+        let mut label = MenuLabel::new();
+        let _ = label.push_str("Use UP/DOWN to select");
+        let _ = menu_items.push(MenuItem {
+            label,
+            feature: MenuFeature::Instructions,
+        });
 
         Self {
             display,
             scroll_up,
             scroll_down,
-            prefix_lines: [
-                "TrustG33k OS",
-                "-----------",
-                "App Name",
-                app_info.name,
-                "Version",
-                app_info.version,
-                "Partitions",
-            ],
-            suffix_lines: ["Use buttons", "UP/DOWN to scroll"],
-            partition_lines,
-            scroll_offset: 0,
+            menu_items,
+            selected_index: 0,
+            view_offset: 0,
+            last_logged_index: None,
             up_pressed: false,
             down_pressed: false,
             dirty: true,
         }
     }
 
-    fn total_lines(&self) -> usize {
-        self.prefix_lines.len() + self.partition_lines.len() + self.suffix_lines.len()
+    fn total_items(&self) -> usize {
+        self.menu_items.len()
     }
 
     fn render(&mut self) {
-        let total = self.total_lines();
-        let prefix_len = self.prefix_lines.len();
-        let partition_len = self.partition_lines.len();
-
-        let start = self.scroll_offset;
-        let end = core::cmp::min(start + VISIBLE_LINES, total);
-
-        let mut lines: Vec<&str, VISIBLE_LINES> = Vec::new();
-        for idx in start..end {
-            let line = if idx < prefix_len {
-                self.prefix_lines[idx]
-            } else if idx < prefix_len + partition_len {
-                let offset = idx - prefix_len;
-                self.partition_lines[offset].as_str()
-            } else {
-                let offset = idx - prefix_len - partition_len;
-                self.suffix_lines[offset]
-            };
-            let _ = lines.push(line);
+        let total = self.total_items();
+        if total == 0 {
+            return;
         }
 
-        if let Some(handle) = &self.display {
-            if let Some(result) = handle.try_with(|display| display.show_lines(&lines)) {
-                if let Err(err) = result {
-                    esp_println::println!("OLED render failed: {:?}", err);
+        let start = self.view_offset;
+        let end = core::cmp::min(start + VISIBLE_LINES, total);
+
+        let mut display_lines: Vec<MenuLabel, VISIBLE_LINES> = Vec::new();
+        for idx in start..end {
+            let item = &self.menu_items[idx];
+            let mut line = MenuLabel::new();
+            if idx == self.selected_index {
+                let _ = write!(line, "> {}", item.label);
+            } else {
+                let _ = write!(line, "  {}", item.label);
+            }
+            let _ = display_lines.push(line);
+        }
+
+        let mut line_refs: Vec<&str, VISIBLE_LINES> = Vec::new();
+        for line in &display_lines {
+            let _ = line_refs.push(line.as_str());
+        }
+
+        if let Some(handle) = self.display.as_ref() {
+            let _ = handle.try_with(|display| display.show_lines(line_refs.as_slice()));
+        }
+
+        if self.last_logged_index != Some(self.selected_index) {
+            if let Some(item) = self.menu_items.get(self.selected_index) {
+                println!("Selected option: {}", item.label.as_str());
+                match item.feature {
+                    MenuFeature::About => println!("Feature: About screen"),
+                    MenuFeature::AppInfo => println!("Feature: Application information"),
+                    MenuFeature::Version => println!("Feature: Firmware version"),
+                    MenuFeature::Partition(idx) => println!("Feature: Partition entry #{}", idx),
+                    MenuFeature::Diagnostics => println!("Feature: Diagnostics"),
+                    MenuFeature::ToggleLed => println!("Feature: Toggle LED"),
+                    MenuFeature::RunMl => println!("Feature: Run ML"),
+                    MenuFeature::Instructions => println!("Feature: Instructions"),
                 }
             }
+            self.last_logged_index = Some(self.selected_index);
         }
     }
 
     fn handle_input(&mut self) {
-        let total = self.total_lines();
+        let total = self.total_items();
+        if total == 0 {
+            return;
+        }
 
         if self.scroll_up.is_low() {
-            if !self.up_pressed && self.scroll_offset > 0 {
-                self.scroll_offset -= 1;
+            if !self.up_pressed && self.selected_index > 0 {
+                self.selected_index -= 1;
                 self.dirty = true;
             }
             self.up_pressed = true;
@@ -120,13 +204,21 @@ impl UiTask {
         }
 
         if self.scroll_down.is_low() {
-            if !self.down_pressed && self.scroll_offset + VISIBLE_LINES < total {
-                self.scroll_offset += 1;
+            if !self.down_pressed && self.selected_index + 1 < total {
+                self.selected_index += 1;
                 self.dirty = true;
             }
             self.down_pressed = true;
         } else {
             self.down_pressed = false;
+        }
+
+        if self.dirty {
+            if self.selected_index < self.view_offset {
+                self.view_offset = self.selected_index;
+            } else if self.selected_index >= self.view_offset + VISIBLE_LINES {
+                self.view_offset = self.selected_index + 1 - VISIBLE_LINES;
+            }
         }
     }
 }

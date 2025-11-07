@@ -1,6 +1,7 @@
 use core::{cell::RefCell, marker::PhantomData};
 
 use critical_section::Mutex;
+use esp_println::println;
 
 pub type DriverCell<T> = Mutex<RefCell<Option<T>>>;
 
@@ -11,10 +12,17 @@ pub enum DriverError {
     InitFailed(&'static str),
 }
 
-#[derive(Clone, Copy)]
 pub struct DriverHandle<T: 'static> {
     cell: &'static DriverCell<T>,
     _marker: PhantomData<T>,
+}
+
+impl<T: 'static> Copy for DriverHandle<T> {}
+
+impl<T: 'static> Clone for DriverHandle<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
 }
 
 impl<T: 'static> DriverHandle<T> {
@@ -25,6 +33,7 @@ impl<T: 'static> DriverHandle<T> {
         }
     }
 
+    #[allow(dead_code)]
     pub fn is_ready(&self) -> bool {
         critical_section::with(|cs| self.cell.borrow_ref(cs).is_some())
     }
@@ -34,7 +43,13 @@ impl<T: 'static> DriverHandle<T> {
     }
 
     pub fn take(&self) -> Option<T> {
-        critical_section::with(|cs| self.cell.borrow_ref_mut(cs).take())
+        critical_section::with(|cs| {
+            let result = self.cell.borrow_ref_mut(cs).take();
+            if result.is_none() {
+                println!("Driver handle take failed");
+            }
+            result
+        })
     }
 
     pub fn replace(&self, value: T) -> Option<T> {
