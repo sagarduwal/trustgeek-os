@@ -18,7 +18,7 @@ use ssd1306::{
     I2CDisplayInterface, Ssd1306,
 };
 
-use crate::i2c::I2cBus;
+use crate::{frames, i2c::I2cBus};
 
 /// Convenience result type for OLED operations.
 pub type OledResult<T> = Result<T, DisplayError>;
@@ -73,6 +73,39 @@ impl OledDisplay {
     /// Display a collection of text lines, starting from the top of the panel.
     pub fn show_lines(&mut self, lines: &[&str]) -> OledResult<()> {
         self.render_lines(lines.iter().copied())
+    }
+
+    /// Play a boot animation using pre-rendered frame data.
+    pub fn play_boot_animation<F>(&mut self, mut delay_ms: F) -> OledResult<()>
+    where
+        F: FnMut(u32),
+    {
+        let stride = frames::FRAME_STRIDE;
+
+        if stride == 0 || stride * frames::NUM_FRAMES > frames::FRAMES.len() {
+            return Ok(());
+        }
+
+        let width = frames::FRAME_W as u8;
+        let height = frames::FRAME_H as u8;
+
+        if let Err(err) = self.display.set_draw_area((0, 0), (width, height)) {
+            return Err(err);
+        }
+
+        for frame_index in 0..frames::NUM_FRAMES {
+            let start = frame_index * stride;
+            let end = start + stride;
+            let frame = &frames::FRAMES[start..end];
+
+            if let Err(err) = self.display.draw(frame) {
+                return Err(err);
+            }
+            delay_ms(33);
+        }
+
+        delay_ms(300);
+        Ok(())
     }
 
     /// Display a boot progress message.

@@ -11,6 +11,7 @@ use esp_hal::{
 use heapless::{String, Vec};
 
 mod bootloader_info;
+mod frames;
 mod gpio;
 mod i2c;
 mod interrupts; // Provides DefaultHandler for interrupt stubs
@@ -68,6 +69,15 @@ fn fill_visible_lines<'a>(
     }
 }
 
+fn spin_delay_ms(ms: u32) {
+    const INNER_LOOPS: u32 = 25_000;
+    for _ in 0..ms {
+        for _ in 0..INNER_LOOPS {
+            core::hint::spin_loop();
+        }
+    }
+}
+
 #[entry]
 fn main() -> ! {
     let peripherals = esp_hal::init(esp_hal::Config::default());
@@ -114,6 +124,7 @@ fn main() -> ! {
     let app_info = get_app_info();
     if let Some(display) = oled_display.as_mut() {
         let _ = display.show_app_info(app_info.name, app_info.version);
+        let _ = display.play_boot_animation(spin_delay_ms);
     }
 
     let partitions = get_partition_info();
