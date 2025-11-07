@@ -204,4 +204,12 @@ impl Scheduler {
     pub fn task_count(&self) -> usize {
         self.tasks.len()
     }
+
+    /// Put the currently running task to sleep for the given number of ticks.
+    #[allow(dead_code)]
+    pub fn current_task_sleep(&mut self, ticks: u32) {
+        if let Some(slot) = self.tasks.iter_mut().find(|slot| !slot.finished) {
+            slot.next_run_tick = timer::get_ticks().wrapping_add(ticks.max(1));
+        }
+    }
 }
