@@ -1,0 +1,19 @@
+[package]
+name = "esp32-nos-ml"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+esp-hal = { version = "1.0", features = ["esp32", "rt"] }
+esp-println = { version = "0.16", features = ["esp32"] }
+esp-backtrace = { version = "0.18", features = ["esp32", "panic-handler", "println"] }
+embedded-hal = "1.0"
+critical-section = "1.1"
+#esp-hal = "1"
+esp-bootloader-esp-idf = { version = "0.4", features = ["esp32"] }
+esp-rom-sys = "0.1"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+opt-level = "z"
