@@ -70,6 +70,11 @@ impl OledDisplay {
         self.display.flush()
     }
 
+    /// Display a collection of text lines, starting from the top of the panel.
+    pub fn show_lines(&mut self, lines: &[&str]) -> OledResult<()> {
+        self.render_lines(lines.iter().copied())
+    }
+
     /// Display a boot progress message.
     pub fn show_boot_progress(&mut self, message: &str) -> OledResult<()> {
         self.render_lines(["Booting ESP32", message].into_iter())

@@ -529,6 +529,7 @@ dependencies = [
  "esp-hal",
  "esp-println",
  "esp-rom-sys",
+ "heapless 0.8.0",
  "ssd1306",
 ]
 
