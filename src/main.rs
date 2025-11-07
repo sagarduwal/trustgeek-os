@@ -61,6 +61,7 @@ fn main() -> ! {
     let esp_hal::peripherals::Peripherals {
         I2C0,
         GPIO2,
+        GPIO5,
         GPIO18,
         GPIO19,
         GPIO21,
@@ -88,6 +89,7 @@ fn main() -> ! {
 
     let scroll_up = Input::new(GPIO18, InputConfig::default().with_pull(Pull::Up));
     let scroll_down = Input::new(GPIO19, InputConfig::default().with_pull(Pull::Up));
+    let select_button = Input::new(GPIO5, InputConfig::default().with_pull(Pull::Up));
 
     esp_println::println!("Initializing I2C0 for OLED display...");
     let i2c_handle = match i2c::init_i2c0(I2C0, GPIO21, GPIO22) {
@@ -146,7 +148,9 @@ fn main() -> ! {
             ui_display,
             scroll_up,
             scroll_down,
-            app_info,
+            select_button,
+            app_info.name,
+            app_info.version,
             partitions,
         ));
         let _ = scheduler.spawn(ui_task);

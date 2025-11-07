@@ -7,7 +7,7 @@ use esp_println::println;
 use heapless::{String, Vec};
 
 use crate::{
-    bootloader_info::{AppInfo, PartitionInfo},
+    bootloader_info::PartitionInfo,
     drivers::{gpio::LedHandle, oled::OledHandle},
     ml,
     scheduler::{Task, TaskCommand, TaskContext, TaskPriority},
@@ -27,7 +27,7 @@ struct MenuItem {
 }
 
 #[allow(dead_code)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum MenuFeature {
     About,
     AppInfo,
@@ -44,13 +44,28 @@ pub struct UiTask {
     display: Option<OledHandle>,
     scroll_up: Input<'static>,
     scroll_down: Input<'static>,
+    select_button: Input<'static>,
     menu_items: MenuItems,
     selected_index: usize,
     view_offset: usize,
+    mode: UiMode,
+    app_name: &'static str,
+    app_version: &'static str,
     last_logged_index: Option<usize>,
     up_pressed: bool,
     down_pressed: bool,
+    select_pressed: bool,
     dirty: bool,
+}
+
+enum UiMode {
+    Menu,
+    Detail(DetailView),
+}
+
+#[derive(Clone, Copy)]
+enum DetailView {
+    About,
 }
 
 impl UiTask {
@@ -58,7 +73,9 @@ impl UiTask {
         display: Option<OledHandle>,
         scroll_up: Input<'static>,
         scroll_down: Input<'static>,
-        app_info: AppInfo,
+        select_button: Input<'static>,
+        app_name: &'static str,
+        app_version: &'static str,
         partitions: [PartitionInfo; 4],
     ) -> Self {
         let mut menu_items: MenuItems = MenuItems::new();
@@ -71,14 +88,14 @@ impl UiTask {
         });
 
         let mut label = MenuLabel::new();
-        let _ = write!(label, "App: {}", app_info.name);
+        let _ = write!(label, "App: {}", app_name);
         let _ = menu_items.push(MenuItem {
             label,
             feature: MenuFeature::AppInfo,
         });
 
         let mut label = MenuLabel::new();
-        let _ = write!(label, "Version: {}", app_info.version);
+        let _ = write!(label, "Version: {}", app_version);
         let _ = menu_items.push(MenuItem {
             label,
             feature: MenuFeature::Version,
@@ -115,7 +132,7 @@ impl UiTask {
         });
 
         let mut label = MenuLabel::new();
-        let _ = label.push_str("Use UP/DOWN to select");
+        let _ = label.push_str("Use UP/DOWN/OK");
         let _ = menu_items.push(MenuItem {
             label,
             feature: MenuFeature::Instructions,
@@ -125,12 +142,17 @@ impl UiTask {
             display,
             scroll_up,
             scroll_down,
+            select_button,
             menu_items,
             selected_index: 0,
             view_offset: 0,
+            mode: UiMode::Menu,
+            app_name,
+            app_version,
             last_logged_index: None,
             up_pressed: false,
             down_pressed: false,
+            select_pressed: false,
             dirty: true,
         }
     }
@@ -140,6 +162,13 @@ impl UiTask {
     }
 
     fn render(&mut self) {
+        match self.mode {
+            UiMode::Menu => self.render_menu(),
+            UiMode::Detail(view) => self.render_detail(view),
+        }
+    }
+
+    fn render_menu(&mut self) {
         let total = self.total_items();
         if total == 0 {
             return;
@@ -187,7 +216,49 @@ impl UiTask {
         }
     }
 
+    fn render_detail(&mut self, view: DetailView) {
+        let mut lines: Vec<MenuLabel, VISIBLE_LINES> = Vec::new();
+
+        match view {
+            DetailView::About => {
+                let mut line = MenuLabel::new();
+                let _ = line.push_str("TrustG33k OS");
+                let _ = lines.push(line);
+
+                let mut line = MenuLabel::new();
+                let _ = write!(line, "App: {}", self.app_name);
+                let _ = lines.push(line);
+
+                let mut line = MenuLabel::new();
+                let _ = write!(line, "Version: {}", self.app_version);
+                let _ = lines.push(line);
+
+                let _ = lines.push(MenuLabel::new());
+
+                let mut line = MenuLabel::new();
+                let _ = line.push_str("> <OK>");
+                let _ = lines.push(line);
+            }
+        }
+
+        let mut line_refs: Vec<&str, VISIBLE_LINES> = Vec::new();
+        for line in &lines {
+            let _ = line_refs.push(line.as_str());
+        }
+
+        if let Some(handle) = self.display.as_ref() {
+            let _ = handle.try_with(|display| display.show_lines(line_refs.as_slice()));
+        }
+    }
+
     fn handle_input(&mut self) {
+        match self.mode {
+            UiMode::Menu => self.handle_menu_input(),
+            UiMode::Detail(_) => self.handle_detail_input(),
+        }
+    }
+
+    fn handle_menu_input(&mut self) {
         let total = self.total_items();
         if total == 0 {
             return;
@@ -218,6 +289,42 @@ impl UiTask {
                 self.view_offset = self.selected_index;
             } else if self.selected_index >= self.view_offset + VISIBLE_LINES {
                 self.view_offset = self.selected_index + 1 - VISIBLE_LINES;
+            }
+        }
+
+        if self.select_button.is_low() {
+            if !self.select_pressed {
+                self.select_pressed = true;
+                self.activate_selection();
+            }
+        } else {
+            self.select_pressed = false;
+        }
+    }
+
+    fn handle_detail_input(&mut self) {
+        if self.select_button.is_low() {
+            if !self.select_pressed {
+                self.select_pressed = true;
+                self.mode = UiMode::Menu;
+                self.last_logged_index = None;
+                self.dirty = true;
+            }
+        } else {
+            self.select_pressed = false;
+        }
+    }
+
+    fn activate_selection(&mut self) {
+        if let Some(item) = self.menu_items.get(self.selected_index) {
+            match item.feature {
+                MenuFeature::About => {
+                    self.mode = UiMode::Detail(DetailView::About);
+                    self.dirty = true;
+                }
+                feature => {
+                    println!("Feature {:?} not implemented", feature);
+                }
             }
         }
     }
