@@ -1,6 +1,9 @@
 //! Cooperative task implementations used by the kernel scheduler.
 
-use core::fmt::Write as _;
+use core::{
+    fmt::Write as _,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 use esp_hal::gpio::Input;
 use esp_println::println;
@@ -42,6 +45,7 @@ enum MenuFeature {
 /// UI task rendering boot information and handling scroll buttons.
 pub struct UiTask {
     display: Option<OledHandle>,
+    led_handle: LedHandle,
     scroll_up: Input<'static>,
     scroll_down: Input<'static>,
     select_button: Input<'static>,
@@ -71,6 +75,7 @@ enum DetailView {
 impl UiTask {
     pub fn new(
         display: Option<OledHandle>,
+        led_handle: LedHandle,
         scroll_up: Input<'static>,
         scroll_down: Input<'static>,
         select_button: Input<'static>,
@@ -140,6 +145,7 @@ impl UiTask {
 
         Self {
             display,
+            led_handle,
             scroll_up,
             scroll_down,
             select_button,
@@ -322,6 +328,22 @@ impl UiTask {
                     self.mode = UiMode::Detail(DetailView::About);
                     self.dirty = true;
                 }
+                MenuFeature::ToggleLed => {
+                    LED_HEARTBEAT_ENABLED.store(false, Ordering::Relaxed);
+                    let new_state = !LED_CURRENT_STATE.load(Ordering::Relaxed);
+                    LED_CURRENT_STATE.store(new_state, Ordering::Relaxed);
+                    let _ = self.led_handle.try_with(|led| {
+                        if new_state {
+                            let _ = led.set_high();
+                        } else {
+                            let _ = led.set_low();
+                        }
+                    });
+                    println!(
+                        "LED manual toggle -> {}",
+                        if new_state { "ON" } else { "OFF" }
+                    );
+                }
                 feature => {
                     println!("Feature {:?} not implemented", feature);
                 }
@@ -351,15 +373,17 @@ impl Task for UiTask {
     }
 }
 
+static LED_HEARTBEAT_ENABLED: AtomicBool = AtomicBool::new(true);
+static LED_CURRENT_STATE: AtomicBool = AtomicBool::new(false);
+
 /// Simple LED heartbeat task.
 pub struct LedTask {
     led: LedHandle,
-    state: bool,
 }
 
 impl LedTask {
     pub fn new(led: LedHandle) -> Self {
-        Self { led, state: false }
+        Self { led }
     }
 }
 
@@ -369,14 +393,21 @@ impl Task for LedTask {
     }
 
     fn poll(&mut self, _ctx: &mut TaskContext) -> TaskCommand {
-        self.state = !self.state;
+        if !LED_HEARTBEAT_ENABLED.load(Ordering::Relaxed) {
+            return TaskCommand::SleepMs(100);
+        }
+
+        let new_state = !LED_CURRENT_STATE.load(Ordering::Relaxed);
+        LED_CURRENT_STATE.store(new_state, Ordering::Relaxed);
+
         let _ = self.led.try_with(|led| {
-            if self.state {
+            if new_state {
                 let _ = led.set_high();
             } else {
                 let _ = led.set_low();
             }
         });
+
         TaskCommand::SleepMs(500)
     }
 }

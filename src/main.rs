@@ -143,21 +143,24 @@ fn main() -> ! {
     unsafe {
         let scheduler = &mut SCHEDULER;
 
-        let ui_display = oled_handle.clone();
-        let ui_task: &mut dyn scheduler::Task = UI_TASK.write(UiTask::new(
-            ui_display,
-            scroll_up,
-            scroll_down,
-            select_button,
-            app_info.name,
-            app_info.version,
-            partitions,
-        ));
-        let _ = scheduler.spawn(ui_task);
+        if let Some(ui_led) = led_handle {
+            let ui_display = oled_handle.clone();
+            let ui_task: &mut dyn scheduler::Task = UI_TASK.write(UiTask::new(
+                ui_display,
+                ui_led,
+                scroll_up,
+                scroll_down,
+                select_button,
+                app_info.name,
+                app_info.version,
+                partitions,
+            ));
+            let _ = scheduler.spawn(ui_task);
 
-        if let Some(handle) = led_handle {
-            let led_task: &mut dyn scheduler::Task = LED_TASK.write(LedTask::new(handle));
+            let led_task: &mut dyn scheduler::Task = LED_TASK.write(LedTask::new(ui_led));
             let _ = scheduler.spawn(led_task);
+        } else {
+            esp_println::println!("Skipping UI/LED tasks: LED handle unavailable");
         }
 
         let ml_task: &mut dyn scheduler::Task = ML_TASK.write(MlTask::new());
